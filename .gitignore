@@ -1,0 +1,37 @@
+# OS/editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Keil build outputs
+Objects/
+Listings/
+RTE/_Target_*/
+*.axf
+*.bin
+*.hex
+*.map
+*.lst
+*.o
+*.d
+*.crf
+*.dep
+*.lnp
+*.plg
+*.sct
+*.bak
+*.tmp
+*.uvoptx
+*.htm
+*.build_log.htm
+JLinkLog.txt
+
+# CMake / generic build dirs
+build/
+cmake-build-*/
+
+# User/local settings
+*.log
