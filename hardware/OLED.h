@@ -5,6 +5,28 @@
 #include "OLED_Data.h"
 
 #ifdef __cplusplus
+/** @brief Lightweight C++ wrapper around the legacy C OLED driver. */
+class OledDisplay {
+public:
+  /** @brief Initialize OLED driver and panel. */
+  void Init(void);
+  /** @brief Clear full display buffer. */
+  void Clear(void);
+  /** @brief Flush display buffer to OLED panel. */
+  void Update(void);
+  /** @brief Clear one rectangular area in display buffer. */
+  void ClearArea(int16_t X, int16_t Y, uint8_t Width, uint8_t Height);
+  /** @brief Draw one string at pixel coordinates. */
+  void ShowString(int16_t X, int16_t Y, const char *String, uint8_t FontSize);
+  /** @brief printf-like helper for one line draw. */
+  void Printf(int16_t X, int16_t Y, uint8_t FontSize, const char *format, ...);
+};
+
+/** @brief Get board default OLED singleton. */
+OledDisplay &BoardOled(void);
+#endif
+
+#ifdef __cplusplus
 extern "C" {
 #endif
 

@@ -1438,7 +1438,57 @@ void OLED_DrawArc(int16_t X, int16_t Y, uint8_t Radius, int16_t StartAngle, int1
 
 }  // extern "C"
 
+#ifdef __cplusplus
 
+/* C++ wrapper: initialize OLED hardware and internal display buffer. */
+void OledDisplay::Init(void)
+{
+  OLED_Init();
+}
+
+/* C++ wrapper: clear full display buffer. */
+void OledDisplay::Clear(void)
+{
+  OLED_Clear();
+}
+
+/* C++ wrapper: flush display buffer to OLED panel. */
+void OledDisplay::Update(void)
+{
+  OLED_Update();
+}
+
+/* C++ wrapper: clear a rectangular area in display buffer. */
+void OledDisplay::ClearArea(int16_t X, int16_t Y, uint8_t Width, uint8_t Height)
+{
+  OLED_ClearArea(X, Y, Width, Height);
+}
+
+/* C++ wrapper: draw one string at pixel coordinates. */
+void OledDisplay::ShowString(int16_t X, int16_t Y, const char *String, uint8_t FontSize)
+{
+  OLED_ShowString(X, Y, (char *)String, FontSize);
+}
+
+/* C++ wrapper: lightweight printf on OLED via temporary text buffer. */
+void OledDisplay::Printf(int16_t X, int16_t Y, uint8_t FontSize, const char *format, ...)
+{
+  char buffer[32];
+  va_list arg;
+  va_start(arg, format);
+  (void)vsnprintf(buffer, sizeof(buffer), format, arg);
+  va_end(arg);
+  OLED_ShowString(X, Y, buffer, FontSize);
+}
+
+/* Accessor for board OLED singleton. */
+OledDisplay &BoardOled(void)
+{
+  static OledDisplay oled;
+  return oled;
+}
+
+#endif
 
 
 

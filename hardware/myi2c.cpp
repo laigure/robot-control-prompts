@@ -1,8 +1,5 @@
 #include "myi2c.h"
 
-#include "main.h"
-#include "stm32f1xx_hal.h"
-
 #ifndef MYI2C_SCL_GPIO_Port
 #define MYI2C_SCL_GPIO_Port GPIOB
 #endif
@@ -16,100 +13,177 @@
 #define MYI2C_SDA_Pin GPIO_PIN_11
 #endif
 
-static inline void MyI2C_Delay(void)
+/* Bind software-I2C SCL/SDA pins. */
+SoftI2CBus::SoftI2CBus(GPIO_TypeDef *scl_port, uint16_t scl_pin, GPIO_TypeDef *sda_port, uint16_t sda_pin)
+    : scl_port_(scl_port), scl_pin_(scl_pin), sda_port_(sda_port), sda_pin_(sda_pin)
 {
-  /* Rough software delay to keep bit-banged I2C timing stable on F1. */
-  for (volatile uint32_t i = 0U; i < 32U; i++)
-  {
-    __NOP();
-  }
 }
 
-extern "C" {
-
-void MyI2C_W_SCL(uint8_t bit_value)
+/* Drive SCL and wait one short software timing slot. */
+void SoftI2CBus::WriteSCL(uint8_t bit_value)
 {
-  HAL_GPIO_WritePin(MYI2C_SCL_GPIO_Port, MYI2C_SCL_Pin, bit_value ? GPIO_PIN_SET : GPIO_PIN_RESET);
-  MyI2C_Delay();
+  HAL_GPIO_WritePin(scl_port_, scl_pin_, bit_value ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  Delay();
 }
 
-void MyI2C_W_SDA(uint8_t bit_value)
+/* Drive SDA and wait one short software timing slot. */
+void SoftI2CBus::WriteSDA(uint8_t bit_value)
 {
-  HAL_GPIO_WritePin(MYI2C_SDA_GPIO_Port, MYI2C_SDA_Pin, bit_value ? GPIO_PIN_SET : GPIO_PIN_RESET);
-  MyI2C_Delay();
+  HAL_GPIO_WritePin(sda_port_, sda_pin_, bit_value ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  Delay();
 }
 
-uint8_t MyI2C_R_SDA(void)
+/* Sample SDA input line. */
+uint8_t SoftI2CBus::ReadSDA(void)
 {
-  MyI2C_Delay();
-  return (HAL_GPIO_ReadPin(MYI2C_SDA_GPIO_Port, MYI2C_SDA_Pin) == GPIO_PIN_SET) ? 1U : 0U;
+  Delay();
+  return (HAL_GPIO_ReadPin(sda_port_, sda_pin_) == GPIO_PIN_SET) ? 1U : 0U;
 }
 
-void MyI2C_Init(void)
+/* Bus idle state (both lines high). */
+void SoftI2CBus::Init(void)
 {
-  /* GPIO mode/clock are expected to be configured by CubeMX. */
-  MyI2C_W_SCL(1U);
-  MyI2C_W_SDA(1U);
+  WriteSCL(1U);
+  WriteSDA(1U);
 }
 
-void MyI2C_Start(void)
+/* Generate I2C START condition. */
+void SoftI2CBus::Start(void)
 {
-  MyI2C_W_SDA(1U);
-  MyI2C_W_SCL(1U);
-  MyI2C_W_SDA(0U);
-  MyI2C_W_SCL(0U);
+  WriteSDA(1U);
+  WriteSCL(1U);
+  WriteSDA(0U);
+  WriteSCL(0U);
 }
 
-void MyI2C_Stop(void)
+/* Generate I2C STOP condition. */
+void SoftI2CBus::Stop(void)
 {
-  MyI2C_W_SDA(0U);
-  MyI2C_W_SCL(1U);
-  MyI2C_W_SDA(1U);
+  WriteSDA(0U);
+  WriteSCL(1U);
+  WriteSDA(1U);
 }
 
-void MyI2C_SendByte(uint8_t byte)
+/* Send one byte MSB-first. */
+void SoftI2CBus::SendByte(uint8_t byte)
 {
   uint8_t i;
   for (i = 0U; i < 8U; i++)
   {
-    MyI2C_W_SDA((uint8_t)(!!(byte & (uint8_t)(0x80U >> i))));
-    MyI2C_W_SCL(1U);
-    MyI2C_W_SCL(0U);
+    WriteSDA((uint8_t)(!!(byte & (uint8_t)(0x80U >> i))));
+    WriteSCL(1U);
+    WriteSCL(0U);
   }
 }
 
-uint8_t MyI2C_ReceiveByte(void)
+/* Receive one byte MSB-first. */
+uint8_t SoftI2CBus::ReceiveByte(void)
 {
   uint8_t i;
-  uint8_t byte = 0x00U;
-  MyI2C_W_SDA(1U);
+  uint8_t byte = 0U;
+  WriteSDA(1U);
   for (i = 0U; i < 8U; i++)
   {
-    MyI2C_W_SCL(1U);
-    if (MyI2C_R_SDA())
+    WriteSCL(1U);
+    if (ReadSDA())
     {
       byte |= (uint8_t)(0x80U >> i);
     }
-    MyI2C_W_SCL(0U);
+    WriteSCL(0U);
   }
   return byte;
 }
 
-void MyI2C_SendAck(uint8_t ack_bit)
+/* Send ACK/NACK bit. */
+void SoftI2CBus::SendAck(uint8_t ack_bit)
 {
-  MyI2C_W_SDA(ack_bit);
-  MyI2C_W_SCL(1U);
-  MyI2C_W_SCL(0U);
+  WriteSDA(ack_bit);
+  WriteSCL(1U);
+  WriteSCL(0U);
 }
 
-uint8_t MyI2C_ReceiveAck(void)
+/* Read ACK bit from slave (0 means ACK). */
+uint8_t SoftI2CBus::ReceiveAck(void)
 {
   uint8_t ack_bit;
-  MyI2C_W_SDA(1U);
-  MyI2C_W_SCL(1U);
-  ack_bit = MyI2C_R_SDA();
-  MyI2C_W_SCL(0U);
+  WriteSDA(1U);
+  WriteSCL(1U);
+  ack_bit = ReadSDA();
+  WriteSCL(0U);
   return ack_bit;
+}
+
+namespace {
+/* Board default software-I2C bus (PB10/PB11). */
+SoftI2CBus g_i2c(MYI2C_SCL_GPIO_Port, MYI2C_SCL_Pin, MYI2C_SDA_GPIO_Port, MYI2C_SDA_Pin);
+}
+
+/* Accessor for board software-I2C singleton. */
+SoftI2CBus &BoardMyI2C(void)
+{
+  return g_i2c;
+}
+
+extern "C" {
+
+/* C compatibility wrapper: drive SCL level. */
+void MyI2C_W_SCL(uint8_t bit_value)
+{
+  BoardMyI2C().WriteSCL(bit_value);
+}
+
+/* C compatibility wrapper: drive SDA level. */
+void MyI2C_W_SDA(uint8_t bit_value)
+{
+  BoardMyI2C().WriteSDA(bit_value);
+}
+
+/* C compatibility wrapper: read SDA level. */
+uint8_t MyI2C_R_SDA(void)
+{
+  return BoardMyI2C().ReadSDA();
+}
+
+/* C compatibility wrapper: initialize software-I2C lines. */
+void MyI2C_Init(void)
+{
+  BoardMyI2C().Init();
+}
+
+/* C compatibility wrapper: send START condition. */
+void MyI2C_Start(void)
+{
+  BoardMyI2C().Start();
+}
+
+/* C compatibility wrapper: send STOP condition. */
+void MyI2C_Stop(void)
+{
+  BoardMyI2C().Stop();
+}
+
+/* C compatibility wrapper: send one byte. */
+void MyI2C_SendByte(uint8_t byte)
+{
+  BoardMyI2C().SendByte(byte);
+}
+
+/* C compatibility wrapper: receive one byte. */
+uint8_t MyI2C_ReceiveByte(void)
+{
+  return BoardMyI2C().ReceiveByte();
+}
+
+/* C compatibility wrapper: send ACK/NACK bit. */
+void MyI2C_SendAck(uint8_t ack_bit)
+{
+  BoardMyI2C().SendAck(ack_bit);
+}
+
+/* C compatibility wrapper: receive ACK bit. */
+uint8_t MyI2C_ReceiveAck(void)
+{
+  return BoardMyI2C().ReceiveAck();
 }
 
 }  // extern "C"

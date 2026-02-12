@@ -336,7 +336,7 @@
               <MiscControls>--cpp;--no_exceptions --no_rtti;--no-multibyte-chars</MiscControls>
               <Define>USE_HAL_DRIVER,STM32F103xB</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy;../Drivers/STM32F1xx_HAL_Driver/Inc;../Drivers/CMSIS/Device/ST/STM32F1xx/Include;../Drivers/CMSIS/Include;../Scr;../hardware</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy;../Drivers/STM32F1xx_HAL_Driver/Inc;../Drivers/CMSIS/Device/ST/STM32F1xx/Include;../Drivers/CMSIS/Include;../Scr;../hardware;../src;../io;../tasks;../tools</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -441,6 +441,16 @@
               <FilePath>..\hardware\serial.h</FilePath>
             </File>
             <File>
+              <FileName>blue_serial.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\hardware\blue_serial.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>blue_serial.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\hardware\blue_serial.h</FilePath>
+            </File>
+            <File>
               <FileName>encoder.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>..\hardware\encoder.cpp</FilePath>
@@ -501,9 +511,9 @@
           <GroupName>Application/User/Core</GroupName>
           <Files>
             <File>
-              <FileName>main.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/main.c</FilePath>
+              <FileName>main.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>../Core/Src/main.cpp</FilePath>
             </File>
             <File>
               <FileName>gpio.c</FileName>
@@ -864,6 +874,51 @@
               <FileName>system_stm32f1xx.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/system_stm32f1xx.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>oi</GroupName>
+          <Files>
+            <File>
+              <FileName>imu_mpu6050.hpp</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\io\imu_mpu6050.hpp</FilePath>
+            </File>
+            <File>
+              <FileName>oled_panel.hpp</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\io\oled_panel.hpp</FilePath>
+            </File>
+            <File>
+              <FileName>uart_plot.hpp</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\io\uart_plot.hpp</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>src</GroupName>
+          <Files>
+            <File>
+              <FileName>balance_car_app.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\src\balance_car_app.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>balance_car_app.hpp</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\src\balance_car_app.hpp</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>tasks</GroupName>
+          <Files>
+            <File>
+              <FileName>attitude_estimator.hpp</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\tasks\attitude_estimator.hpp</FilePath>
             </File>
           </Files>
         </Group>
