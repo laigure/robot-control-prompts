@@ -36,7 +36,7 @@ public:
 private:
   static inline void Delay(void)
   {
-    for (volatile uint32_t i = 0U; i < 32U; i++)
+    for (volatile uint32_t i = 0U; i < 2U; i++)
     {
       __NOP();
     }

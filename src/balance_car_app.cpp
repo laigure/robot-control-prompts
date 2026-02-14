@@ -61,7 +61,7 @@ void BalanceCarApp::Init(void)
   BoardKey().Init();
   BoardMotor().Init();
   BoardEncoder().Init();
-//  BoardSerial().Init();
+  BoardSerial().Init();
   BoardMotor().SetPWM(1U, 0);
   BoardMotor().SetPWM(2U, 0);
 
@@ -214,31 +214,31 @@ void BalanceCarApp::Loop(void)
   BoardOled().Printf(0, 16, OLED_6X8, "I:%05.2f", data.pid_ki);
   BoardOled().Printf(0, 24, OLED_6X8, "D:%05.2f", data.pid_kd);
   BoardOled().Printf(0, 32, OLED_6X8, "T:%+05.1f", data.pid_target);
-  BoardOled().Printf(0, 40, OLED_6X8, "A:%+05.1f", data.angle);//
+  BoardOled().Printf(0, 40, OLED_6X8, "A:%+05.1f", data.angle+3);//
   BoardOled().Printf(0, 48, OLED_6X8, "O:%+05.0f", data.pid_out);
   BoardOled().Printf(0, 56, OLED_6X8, "R:%1u C:%2u/%2u E:%1u",
                      data.run_flag, data.timer_count, data.timer_count_max, data.timer_error);
   BoardOled().Update();
 
-//  {
-//    char packet[100];
-//    if (BoardBlueSerial().ReadPacket(packet, sizeof(packet)) != 0U)
-//    {
-//      HandleBluePacket(packet);
-//    }
-//  }
+  {
+    char packet[100];
+    if (BoardBlueSerial().ReadPacket(packet, sizeof(packet)) != 0U)
+    {
+      HandleBluePacket(packet);
+    }
+  }
 
-//  {
-//    static uint32_t last_plot_ms = 0U;
-//    const uint32_t now_ms = HAL_GetTick();
-//    if ((uint32_t)(now_ms - last_plot_ms) >= 50U)
-//    {
-//      last_plot_ms = now_ms;
-//      const int16_t target_x10 = (int16_t)(data.pid_target * 10.0f);
-//      const int16_t angle_x10 = (int16_t)((data.angle ) * 10.0f);
-//      BoardBlueSerial().Printf("[plot,%d,%d]", (int)target_x10, (int)angle_x10);
-//    }
-//  }
+  {
+    static uint32_t last_plot_ms = 0U;
+    const uint32_t now_ms = HAL_GetTick();
+    if ((uint32_t)(now_ms - last_plot_ms) >= 50U)
+    {
+      last_plot_ms = now_ms;
+      const int16_t target_x10 = (int16_t)(data.pid_target * 10.0f);
+      const int16_t angle_x10 = (int16_t)((data.angle ) * 10.0f);
+      BoardBlueSerial().Printf("[plot,%d,%d]", (int)target_x10, (int)angle_x10+3);
+    }
+  }
 }
 
 /* TIM1 periodic callback: key scan and 10-step control task scheduler. */
@@ -288,7 +288,7 @@ void BalanceCarApp::OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
 
       if (run_flag_ != 0U)
       {
-        pid_out_ = angle_pid_.Update(angle_);//新变化
+        pid_out_ = angle_pid_.Update(angle_+3);//新变化
         const int16_t ave_pwm = (int16_t)(-pid_out_);
         left_pwm_ = ClampPwm((int16_t)(ave_pwm + dif_pwm_ / 2));
         right_pwm_ = ClampPwm((int16_t)(ave_pwm - dif_pwm_ / 2));

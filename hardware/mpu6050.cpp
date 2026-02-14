@@ -121,8 +121,8 @@ bool Mpu6050Device::Init(void)
 
   (void)WriteReg(MPU6050_PWR_MGMT_1, 0x01U);
   (void)WriteReg(MPU6050_PWR_MGMT_2, 0x00U);
-  (void)WriteReg(MPU6050_SMPLRT_DIV, 0x09U);
-  (void)WriteReg(MPU6050_CONFIG, 0x06U);
+  (void)WriteReg(MPU6050_SMPLRT_DIV, 0x07U);
+  (void)WriteReg(MPU6050_CONFIG, 0x00U);
   (void)WriteReg(MPU6050_GYRO_CONFIG, 0x18U);
   (void)WriteReg(MPU6050_ACCEL_CONFIG, 0x18U);
 
