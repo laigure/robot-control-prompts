@@ -505,6 +505,16 @@
               <FileType>5</FileType>
               <FilePath>..\hardware\myi2c.h</FilePath>
             </File>
+            <File>
+              <FileName>pid.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\hardware\pid.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>pid.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\hardware\pid.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

@@ -10,19 +10,20 @@ LedDevice::LedDevice(GPIO_TypeDef *port, uint16_t pin)
 /* Initialize LED output default state (off). */
 void LedDevice::Init(void)
 {
-  HAL_GPIO_WritePin(port_, pin_, GPIO_PIN_RESET);
+  /* PC13 board LED is active-low on most STM32F103 boards. */
+  HAL_GPIO_WritePin(port_, pin_, GPIO_PIN_SET);
 }
 
 /* Drive LED pin high. */
 void LedDevice::On(void)
 {
-  HAL_GPIO_WritePin(port_, pin_, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(port_, pin_, GPIO_PIN_RESET);
 }
 
 /* Drive LED pin low. */
 void LedDevice::Off(void)
 {
-  HAL_GPIO_WritePin(port_, pin_, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(port_, pin_, GPIO_PIN_SET);
 }
 
 /* Toggle LED pin output level. */

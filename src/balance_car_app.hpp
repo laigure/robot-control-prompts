@@ -7,9 +7,8 @@
 
 #include "imu_mpu6050.hpp"
 #include "oled_panel.hpp"
-#include "uart_plot.hpp"
-#include "attitude_estimator.hpp"
 #include "motor.h"
+#include "pid.h"
 
 namespace app {
 
@@ -29,14 +28,16 @@ public:
 private:
   /** @brief Runtime telemetry snapshot used by UI/serial output. */
   struct RuntimeData {
-    int16_t ax;
-    int16_t ay;
-    int16_t az;
-    int16_t gx;
     int16_t gy;
-    int16_t gz;
-    int32_t left_speed_centi_rps;
-    int32_t right_speed_centi_rps;
+    uint8_t run_flag;
+    uint8_t timer_error;
+    uint16_t timer_count;
+    uint16_t timer_count_max;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float pid_target;
+    float pid_out;
     float angle_acc;
     float angle_gyro;
     float angle;
@@ -44,14 +45,15 @@ private:
 
   /** @brief Copy ISR-updated runtime fields into a stable snapshot. */
   void CopyRuntimeData(RuntimeData *out) const;
-  /** @brief Handle one debounced key event and update flow behavior. */
-  void HandleKeyEvent(uint8_t key);
+  /** @brief Parse one bluetooth packet payload and update runtime parameters. */
+  void HandleBluePacket(char *packet);
+  /** @brief Clamp signed PWM command to motor range [-100, 100]. */
+  static int16_t ClampPwm(int16_t pwm);
 
 private:
   io::Mpu6050Imu imu_;
   io::OledPanel oled_;
-  io::UartPlot uart_plot_;
-  tasks::AttitudeEstimator estimator_;
+  PidController angle_pid_;
 
   volatile int16_t ax_;
   volatile int16_t ay_;
@@ -61,18 +63,19 @@ private:
   volatile int16_t gz_;
   volatile uint8_t timer_error_;
   volatile uint16_t timer_count_;
+  volatile uint16_t timer_count_max_;
   volatile float angle_acc_;
   volatile float angle_gyro_;
   volatile float angle_;
-  volatile int32_t left_speed_centi_rps_;
-  volatile int32_t right_speed_centi_rps_;
+  volatile float pid_out_;
+  volatile uint8_t run_flag_;
+  volatile int16_t dif_pwm_;
+  volatile int16_t left_pwm_;
+  volatile int16_t right_pwm_;
   bool imu_ready_;
-
-  uint16_t flow_period_ms_;
-  bool flow_forward_;
-  bool flow_enable_;
-  int16_t left_pwm_;
-  int16_t right_pwm_;
+  float angle_kp_;
+  float angle_ki_;
+  float angle_kd_;
 };
 
 }  // namespace app

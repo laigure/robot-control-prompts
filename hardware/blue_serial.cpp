@@ -88,8 +88,18 @@ void BlueSerialLink::SendNumber(uint32_t number, uint8_t length)
 void BlueSerialLink::VPrintf(const char *format, va_list arg)
 {
   char buffer[kPacketBufferSize];
-  (void)vsnprintf(buffer, sizeof(buffer), format, arg);
-  SendString(buffer);
+  int written = vsnprintf(buffer, sizeof(buffer), format, arg);
+  if (written <= 0)
+  {
+    return;
+  }
+
+  if (written >= (int)sizeof(buffer))
+  {
+    written = (int)sizeof(buffer) - 1;
+  }
+
+  SendArray((const uint8_t *)buffer, (uint16_t)written);
 }
 
 /* printf-like send wrapper. */

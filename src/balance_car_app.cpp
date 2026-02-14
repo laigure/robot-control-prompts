@@ -1,203 +1,308 @@
 #include "balance_car_app.hpp"
 
-#include "led.h"
-#include "key.h"
-#include "motor.h"
-#include "encoder.h"
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "blue_serial.h"
+#include "encoder.h"
 #include "irq_lock.hpp"
+#include "key.h"
+#include "led.h"
+#include "motor.h"
+#include "serial.h"
 
 namespace app {
 namespace {
-/* Adjust this constant to your encoder+gearbox pulses per one wheel revolution. */
-static const int32_t kEncoderCountsPerTurn = 780;
-/* TIM1 period is 1 ms in current CubeMX config. */
-static const int32_t kControlPeriodMs = 1;
-/* Speed estimate/update window in ISR to reduce encoder quantization steps. */
-static const uint8_t kSpeedWindowMs = 20U;
-/* 1st-order IIR smoothing strength: y += (x - y) / kSpeedFilterDiv. */
-static const int32_t kSpeedFilterDiv = 4;
+static const float kAngleKpDefault = 3.0f;
+static const float kAngleKiDefault = 0.1f;
+static const float kAngleKdDefault = 3.0f;
+static const float kPidOutMax = 100.0f;
+static const float kPidOutMin = -100.0f;
+static const int16_t kGyroBiasLsb = 16;
+static const float kAngleAccOffsetDeg = 0.5f;
+static const float kComplementaryAlpha = 0.01f;
+static const float kGyroScaleDps = 2000.0f / 32768.0f;
+static const float kControlStepSec = 0.01f;
+static const float kStopAngleDeg = 50.0f;
+static const uint16_t kControlDivider = 10U;
 }
 
-/* Set deterministic startup values for runtime state and flow control. */
+/* Set deterministic startup values for runtime state and PID parameters. */
 BalanceCarApp::BalanceCarApp()
-    : ax_(0), ay_(0), az_(0), gx_(0), gy_(0), gz_(0),
-      timer_error_(0), timer_count_(0),
+    : imu_(), oled_(), angle_pid_(kAngleKpDefault, kAngleKiDefault, kAngleKdDefault, kPidOutMin, kPidOutMax),
+      ax_(0), ay_(0), az_(0), gx_(0), gy_(0), gz_(0), timer_error_(0), timer_count_(0), timer_count_max_(0),
       angle_acc_(0.0f), angle_gyro_(0.0f), angle_(0.0f),
-      left_speed_centi_rps_(0), right_speed_centi_rps_(0),
+      pid_out_(0.0f), run_flag_(0U),
+      dif_pwm_(0), left_pwm_(0), right_pwm_(0),
       imu_ready_(false),
-      flow_period_ms_(120U), flow_forward_(true), flow_enable_(true),
-      left_pwm_(0), right_pwm_(0)
+      angle_kp_(kAngleKpDefault), angle_ki_(kAngleKiDefault), angle_kd_(kAngleKdDefault)
 {
 }
 
-/* Initialize all board services and app-level modules once at boot. */
+/* Clamp signed PWM command into motor driver's accepted range. */
+int16_t BalanceCarApp::ClampPwm(int16_t pwm)
+{
+  if (pwm > 100)
+  {
+    return 100;
+  }
+  if (pwm < -100)
+  {
+    return -100;
+  }
+  return pwm;
+}
+
+/* Initialize board services and PID control defaults once at boot. */
 void BalanceCarApp::Init(void)
 {
-  /* Basic IO services: LED, key scan, and non-blocking flow runner. */
   BoardLed().Init();
   BoardKey().Init();
-  BoardLedFlow().Init();
   BoardMotor().Init();
   BoardEncoder().Init();
-  /* Board wiring maps logical left/right to opposite driver channels. */
-  BoardMotor().SetPWM(1U, right_pwm_);
-  BoardMotor().SetPWM(2U, left_pwm_);
-  BoardLedFlow().SetPeriodMs(flow_period_ms_);
-  BoardLedFlow().SetForward(flow_forward_);
-  BoardLedFlow().SetEnable(flow_enable_);
+//  BoardSerial().Init();
+  BoardMotor().SetPWM(1U, 0);
+  BoardMotor().SetPWM(2U, 0);
 
-  /* UI startup splash. */
   oled_.Init();
-  oled_.ShowBootScreen();
-  HAL_Delay(1000);
   BoardOled().Clear();
 
-  /* Sensor and estimation pipeline setup. */
   imu_ready_ = imu_.Init();
-  uart_plot_.Init();
+
   BoardBlueSerial().Init();
   BoardBlueSerial().Printf("BT Ready\r\n");
-  BoardBlueSerial().Printf("Send packet: [hello]\r\n");
-  estimator_.Configure(0.013f, 0.001f, 16.0f);
-  estimator_.Reset();
+  BoardBlueSerial().Printf("Usage: [slider,1,3.00]\r\n");
+  BoardBlueSerial().Printf("Usage: [slider,2,0.10]\r\n");
+  BoardBlueSerial().Printf("Usage: [slider,3,3.00]\r\n");
+  BoardBlueSerial().Printf("Usage: [joystick,0,0,0,0]\r\n");
 
-  /* Keep an explicit on-screen error if IMU handshake fails. */
+  angle_pid_.Init();
+  angle_pid_.Configure(angle_kp_, angle_ki_, angle_kd_);
+  angle_pid_.SetOutputLimits(kPidOutMin, kPidOutMax);
+  angle_pid_.SetTarget(0.0f);
+
   if (!imu_ready_)
   {
     oled_.ShowError("MPU ID ERR");
   }
 }
 
-/* Main loop: handle events, render latest snapshot, and stream telemetry. */
+/* Parse one bluetooth payload packet and update PID/target commands. */
+void BalanceCarApp::HandleBluePacket(char *packet)
+{
+  char *tag = strtok(packet, ",");
+  if (tag == 0)
+  {
+    return;
+  }
+
+  if (strcmp(tag, "slider") == 0)
+  {
+    char *channel = strtok(0, ",");
+    char *value = strtok(0, ",");
+    if ((channel == 0) || (value == 0))
+    {
+      return;
+    }
+
+    const float parsed = (float)atof(value);
+    const int32_t channel_id = (int32_t)atoi(channel);
+    bool gains_changed = false;
+    float kp = angle_kp_;
+    float ki = angle_ki_;
+    float kd = angle_kd_;
+
+    if ((channel_id == 1) || (strcmp(channel, "AngleKp") == 0))
+    {
+      kp = parsed;
+      gains_changed = true;
+    }
+    else if ((channel_id == 2) || (strcmp(channel, "AngleKi") == 0))
+    {
+      ki = parsed;
+      gains_changed = true;
+    }
+    else if ((channel_id == 3) || (strcmp(channel, "AngleKd") == 0))
+    {
+      kd = parsed;
+      gains_changed = true;
+    }
+
+    if (gains_changed)
+    {
+      IrqLock lock;
+      angle_kp_ = kp;
+      angle_ki_ = ki;
+      angle_kd_ = kd;
+      angle_pid_.Configure(angle_kp_, angle_ki_, angle_kd_);
+    }
+  }
+  else if (strcmp(tag, "joystick") == 0)
+  {
+    char *lh_s = strtok(0, ",");
+    char *lv_s = strtok(0, ",");
+    char *rh_s = strtok(0, ",");
+    char *rv_s = strtok(0, ",");
+    (void)lh_s;
+    (void)rv_s;
+    if ((lv_s == 0) || (rh_s == 0))
+    {
+      return;
+    }
+
+    const int16_t lv = (int16_t)atoi(lv_s);
+    const int16_t rh = (int16_t)atoi(rh_s);
+    const float target = (float)lv / 10.0f;
+    const int16_t dif = (int16_t)(rh / 2);
+
+    IrqLock lock;
+    angle_pid_.SetTarget(target);
+    dif_pwm_ = dif;
+  }
+}
+
+/* Main loop: key toggle, OLED status, bluetooth command parse and plotting. */
 void BalanceCarApp::Loop(void)
 {
   RuntimeData data;
   const uint8_t key = BoardKey().GetNum();
 
-  /* Key events are edge-triggered by the interrupt-side scanner. */
-  if (key != 0U)
+  if (key == 1U)
   {
-    if (key == 1U)
+    bool stop_motors = false;
     {
-      left_pwm_ = (int16_t)(left_pwm_ + 10);
-    }
-    else if (key == 2U)
-    {
-      right_pwm_ = (int16_t)(right_pwm_ + 10);
-    }
-    else if (key == 3U)
-    {
-      left_pwm_ = (int16_t)(left_pwm_ - 10);
-    }
-    else if (key == 4U)
-    {
-      right_pwm_ = (int16_t)(right_pwm_ - 10);
+      IrqLock lock;
+      if (run_flag_ == 0U)
+      {
+        angle_pid_.Init();
+        angle_pid_.Configure(angle_kp_, angle_ki_, angle_kd_);
+        angle_pid_.SetOutputLimits(kPidOutMin, kPidOutMax);
+        run_flag_ = 1U;
+      }
+      else
+      {
+        run_flag_ = 0U;
+        pid_out_ = 0.0f;
+        left_pwm_ = 0;
+        right_pwm_ = 0;
+        stop_motors = true;
+      }
     }
 
-    if (left_pwm_ > 100) left_pwm_ = 100;
-    if (left_pwm_ < -100) left_pwm_ = -100;
-    if (right_pwm_ > 100) right_pwm_ = 100;
-    if (right_pwm_ < -100) right_pwm_ = -100;
-
-    /* Board wiring maps logical left/right to opposite driver channels. */
-    BoardMotor().SetPWM(1U, right_pwm_);
-    BoardMotor().SetPWM(2U, left_pwm_);
-    HandleKeyEvent(key);
+    if (stop_motors)
+    {
+      BoardMotor().SetPWM(1U, 0);
+      BoardMotor().SetPWM(2U, 0);
+    }
   }
 
-  /* Copy volatile fields once to avoid tearing during rendering/output. */
   CopyRuntimeData(&data);
 
+  if (data.run_flag != 0U)
   {
-    io::OledTelemetry telemetry;
-    telemetry.ax = data.ax;
-    telemetry.ay = data.ay;
-    telemetry.az = data.az;
-    telemetry.gx = data.gx;
-    telemetry.gy = data.gy;
-    telemetry.gz = data.gz;
-    telemetry.left_speed_centi_rps = data.left_speed_centi_rps;
-    telemetry.right_speed_centi_rps = data.right_speed_centi_rps;
-    oled_.ShowTelemetry(telemetry);
+    BoardLed().On();
+  }
+  else
+  {
+    BoardLed().Off();
   }
 
-  {
-    char packet[100];
-    if (BoardBlueSerial().ReadPacket(packet, sizeof(packet)) != 0U)
-    {
-      BoardBlueSerial().Printf("[ACK:%s]\r\n", packet);
-    }
-  }
+  BoardOled().Clear();
+  BoardOled().Printf(0, 0, OLED_6X8, "  Angle");
+  BoardOled().Printf(0, 8, OLED_6X8, "P:%05.2f", data.pid_kp);
+  BoardOled().Printf(0, 16, OLED_6X8, "I:%05.2f", data.pid_ki);
+  BoardOled().Printf(0, 24, OLED_6X8, "D:%05.2f", data.pid_kd);
+  BoardOled().Printf(0, 32, OLED_6X8, "T:%+05.1f", data.pid_target);
+  BoardOled().Printf(0, 40, OLED_6X8, "A:%+05.1f", data.angle);//
+  BoardOled().Printf(0, 48, OLED_6X8, "O:%+05.0f", data.pid_out);
+  BoardOled().Printf(0, 56, OLED_6X8, "R:%1u C:%2u/%2u E:%1u",
+                     data.run_flag, data.timer_count, data.timer_count_max, data.timer_error);
+  BoardOled().Update();
 
-  BoardBlueSerial().Printf("plot,%f,%f,%f", data.angle_acc, data.angle_gyro, data.angle);
+//  {
+//    char packet[100];
+//    if (BoardBlueSerial().ReadPacket(packet, sizeof(packet)) != 0U)
+//    {
+//      HandleBluePacket(packet);
+//    }
+//  }
+
+//  {
+//    static uint32_t last_plot_ms = 0U;
+//    const uint32_t now_ms = HAL_GetTick();
+//    if ((uint32_t)(now_ms - last_plot_ms) >= 50U)
+//    {
+//      last_plot_ms = now_ms;
+//      const int16_t target_x10 = (int16_t)(data.pid_target * 10.0f);
+//      const int16_t angle_x10 = (int16_t)((data.angle ) * 10.0f);
+//      BoardBlueSerial().Printf("[plot,%d,%d]", (int)target_x10, (int)angle_x10);
+//    }
+//  }
 }
 
-/* TIM1 periodic callback (1 ms): run time-critical non-blocking tasks. */
+/* TIM1 periodic callback: key scan and 10-step control task scheduler. */
 void BalanceCarApp::OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
 {
+  static uint16_t count0 = 0U;
+
   if (htim->Instance != TIM1)
   {
     return;
   }
+  /* Per-cycle flag: clear first, then set only if an overrun is seen in this ISR. */
+  timer_error_ = 0U;
 
-  /* Non-blocking periodic services driven by timer tick. */
   BoardKey().Tick();
-  BoardLedFlow().Tick1ms();
 
-  /* Sample IMU and update estimator inside the fixed-rate context. */
-  if (imu_ready_)
+  count0++;
+  if (count0 >= kControlDivider)
   {
-    tasks::ImuSample sample;
-    imu_.Read(&sample);
-    estimator_.Update(sample);
+    count0 = 0U;
 
-    ax_ = sample.ax;
-    ay_ = sample.ay;
-    az_ = sample.az;
-    gx_ = sample.gx;
-    gy_ = sample.gy;
-    gz_ = sample.gz;
-    angle_acc_ = estimator_.AngleAccDeg();
-    angle_gyro_ = estimator_.AngleGyroDeg();
-    angle_ = estimator_.AngleDeg();
-  }
-
-  /* ISR-domain speed estimate: accumulate encoder counts in a short window,
-   * then divide by window period and apply light IIR smoothing.
-   */
-  {
-    static int32_t left_acc_count = 0;
-    static int32_t right_acc_count = 0;
-    static uint8_t window_ms = 0U;
-    static int32_t left_filtered_centi_rps = 0;
-    static int32_t right_filtered_centi_rps = 0;
-
-    left_acc_count -= (int32_t)BoardEncoder().GetLeft();
-    right_acc_count -= (int32_t)BoardEncoder().GetRight();
-    window_ms = (uint8_t)(window_ms + kControlPeriodMs);
-
-    if (window_ms >= kSpeedWindowMs)
+    if (imu_ready_)
     {
-      const int64_t denominator = (int64_t)kEncoderCountsPerTurn * (int64_t)window_ms;
-      if (denominator > 0)
+      tasks::ImuSample sample;
+      imu_.Read(&sample);
+
+      const int16_t gy_corr = (int16_t)(sample.gy - kGyroBiasLsb);
+      const float angle_acc =
+          (-atan2f((float)sample.ax, (float)sample.az) * 57.2957795f) + kAngleAccOffsetDeg;
+      const float angle_gyro = angle_ + ((float)gy_corr * kGyroScaleDps * kControlStepSec);
+      const float angle = kComplementaryAlpha * angle_acc + (1.0f - kComplementaryAlpha) * angle_gyro;
+
+      ax_ = sample.ax;
+      ay_ = sample.ay;
+      az_ = sample.az;
+      gx_ = sample.gx;
+      gy_ = gy_corr;
+      gz_ = sample.gz;
+      angle_acc_ = angle_acc;
+      angle_gyro_ = angle_gyro;
+      angle_ = angle;
+
+      if ((angle_ > kStopAngleDeg) || (angle_ < -kStopAngleDeg))
       {
-        /* centi-rps = delta_count * (100 * 1000) / (counts_per_turn * period_ms). */
-        const int32_t left_raw_centi_rps =
-            (int32_t)(((int64_t)left_acc_count * 100000LL) / denominator);
-        const int32_t right_raw_centi_rps =
-            (int32_t)(((int64_t)right_acc_count * 100000LL) / denominator);
-
-        left_filtered_centi_rps += (left_raw_centi_rps - left_filtered_centi_rps) / kSpeedFilterDiv;
-        right_filtered_centi_rps += (right_raw_centi_rps - right_filtered_centi_rps) / kSpeedFilterDiv;
-
-        left_speed_centi_rps_ = left_filtered_centi_rps;
-        right_speed_centi_rps_ = right_filtered_centi_rps;
+        run_flag_ = 0U;
       }
 
-      left_acc_count = 0;
-      right_acc_count = 0;
-      window_ms = 0U;
+      if (run_flag_ != 0U)
+      {
+        pid_out_ = angle_pid_.Update(angle_);//新变化
+        const int16_t ave_pwm = (int16_t)(-pid_out_);
+        left_pwm_ = ClampPwm((int16_t)(ave_pwm + dif_pwm_ / 2));
+        right_pwm_ = ClampPwm((int16_t)(ave_pwm - dif_pwm_ / 2));
+        BoardMotor().SetPWM(1U, left_pwm_);
+        BoardMotor().SetPWM(2U, right_pwm_);
+      }
+      else
+      {
+        pid_out_ = 0.0f;
+        left_pwm_ = 0;
+        right_pwm_ = 0;
+        BoardMotor().SetPWM(1U, 0);
+        BoardMotor().SetPWM(2U, 0);
+      }
     }
   }
 
@@ -209,56 +314,27 @@ void BalanceCarApp::OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
   }
   /* Capture current counter value for debug/monitor display. */
   timer_count_ = (uint16_t)__HAL_TIM_GET_COUNTER(htim);
-}
-
-/* Map key IDs to flow-runner behavior changes. */
-void BalanceCarApp::HandleKeyEvent(uint8_t key)
-{
-  /* KEY1: faster (shorter period). */
-  if (key == 1U)
+  if (timer_count_ > timer_count_max_)
   {
-    if (flow_period_ms_ > 20U)
-    {
-      flow_period_ms_ = (uint16_t)(flow_period_ms_ - 20U);
-    }
-    BoardLedFlow().SetPeriodMs(flow_period_ms_);
-  }
-  /* KEY2: slower (longer period). */
-  else if (key == 2U)
-  {
-    if (flow_period_ms_ < 1000U)
-    {
-      flow_period_ms_ = (uint16_t)(flow_period_ms_ + 20U);
-    }
-    BoardLedFlow().SetPeriodMs(flow_period_ms_);
-  }
-  /* KEY3: reverse/forward direction toggle. */
-  else if (key == 3U)
-  {
-    flow_forward_ = !flow_forward_;
-    BoardLedFlow().SetForward(flow_forward_);
-  }
-  /* KEY4: enable/disable flow output. */
-  else if (key == 4U)
-  {
-    flow_enable_ = !flow_enable_;
-    BoardLedFlow().SetEnable(flow_enable_);
+    timer_count_max_ = timer_count_;
   }
 }
 
-/* Atomic snapshot copy from ISR-updated volatile members to plain struct. */
+/* Atomic snapshot copy from ISR-updated runtime members to plain struct. */
 void BalanceCarApp::CopyRuntimeData(RuntimeData *out) const
 {
   IrqLock lock;
 
-  out->ax = ax_;
-  out->ay = ay_;
-  out->az = az_;
-  out->gx = gx_;
   out->gy = gy_;
-  out->gz = gz_;
-  out->left_speed_centi_rps = left_speed_centi_rps_;
-  out->right_speed_centi_rps = right_speed_centi_rps_;
+  out->run_flag = run_flag_;
+  out->timer_error = timer_error_;
+  out->timer_count = timer_count_;
+  out->timer_count_max = timer_count_max_;
+  out->pid_kp = angle_kp_;
+  out->pid_ki = angle_ki_;
+  out->pid_kd = angle_kd_;
+  out->pid_target = angle_pid_.Target();
+  out->pid_out = pid_out_;
   out->angle_acc = angle_acc_;
   out->angle_gyro = angle_gyro_;
   out->angle = angle_;

@@ -17,7 +17,7 @@ struct ImuSample {
 class AttitudeEstimator {
 public:
   AttitudeEstimator()
-      : alpha_(0.013f), dt_sec_(0.001f), gyro_bias_lsb_(16.0f),
+      : alpha_(0.013f), dt_sec_(0.001f), gyro_bias_lsb_(0.0f),
         angle_acc_deg_(0.0f), angle_gyro_deg_(0.0f), angle_deg_(0.0f) {}
 
   void Configure(float alpha, float dt_sec, float gyro_bias_lsb)
