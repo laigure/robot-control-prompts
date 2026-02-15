@@ -33,14 +33,26 @@ private:
     uint8_t timer_error;
     uint16_t timer_count;
     uint16_t timer_count_max;
-    float pid_kp;
-    float pid_ki;
-    float pid_kd;
-    float pid_target;
-    float pid_out;
+    float angle_pid_kp;
+    float angle_pid_ki;
+    float angle_pid_kd;
+    float speed_pid_kp;
+    float speed_pid_ki;
+    float speed_pid_kd;
+    float turn_pid_kp;
+    float turn_pid_ki;
+    float turn_pid_kd;
+    float angle_pid_target;
+    float speed_pid_target;
+    float turn_pid_target;
+    float angle_pid_out;
+    float speed_pid_out;
+    float turn_pid_out;
     float angle_acc;
     float angle_gyro;
     float angle;
+    float ave_speed;
+    float dif_speed;
   };
 
   /** @brief Copy ISR-updated runtime fields into a stable snapshot. */
@@ -54,6 +66,8 @@ private:
   io::Mpu6050Imu imu_;
   io::OledPanel oled_;
   PidController angle_pid_;
+  PidController speed_pid_;
+  PidController turn_pid_;
 
   volatile int16_t ax_;
   volatile int16_t ay_;
@@ -61,13 +75,23 @@ private:
   volatile int16_t gx_;
   volatile int16_t gy_;
   volatile int16_t gz_;
+
   volatile uint8_t timer_error_;
   volatile uint16_t timer_count_;
   volatile uint16_t timer_count_max_;
+
   volatile float angle_acc_;
   volatile float angle_gyro_;
   volatile float angle_;
-  volatile float pid_out_;
+
+  volatile float left_speed_;
+  volatile float right_speed_;
+  volatile float ave_speed_;
+  volatile float dif_speed_;
+
+  volatile float angle_pid_out_;
+  volatile float speed_pid_out_;
+  volatile float turn_pid_out_;
   volatile uint8_t run_flag_;
   volatile int16_t dif_pwm_;
   volatile int16_t left_pwm_;
@@ -76,6 +100,12 @@ private:
   float angle_kp_;
   float angle_ki_;
   float angle_kd_;
+  float speed_kp_;
+  float speed_ki_;
+  float speed_kd_;
+  float turn_kp_;
+  float turn_ki_;
+  float turn_kd_;
 };
 
 }  // namespace app

@@ -15,28 +15,50 @@
 namespace app {
 namespace {
 static const float kAngleKpDefault = 3.0f;
-static const float kAngleKiDefault = 0.1f;
+static const float kAngleKiDefault = 0.007f;
 static const float kAngleKdDefault = 3.0f;
-static const float kPidOutMax = 100.0f;
-static const float kPidOutMin = -100.0f;
+static const float kAnglePidOutMax = 100.0f;
+static const float kAnglePidOutMin = -100.0f;
+
+static const float kSpeedKpDefault = 2.0f;
+static const float kSpeedKiDefault = 0.05f;
+static const float kSpeedKdDefault = 0.0f;
+static const float kSpeedPidOutMax = 20.0f;
+static const float kSpeedPidOutMin = -20.0f;
+
+static const float kTurnKpDefault = 4.0f;
+static const float kTurnKiDefault = 3.0f;
+static const float kTurnKdDefault = 0.0f;
+static const float kTurnPidOutMax = 50.0f;
+static const float kTurnPidOutMin = -50.0f;
+
 static const int16_t kGyroBiasLsb = 16;
 static const float kAngleAccOffsetDeg = 0.5f;
 static const float kComplementaryAlpha = 0.01f;
 static const float kGyroScaleDps = 2000.0f / 32768.0f;
 static const float kControlStepSec = 0.01f;
+static const float kSpeedStepSec = 0.05f;
 static const float kStopAngleDeg = 50.0f;
-static const uint16_t kControlDivider = 10U;
+static const uint16_t kControlDivider = 10U;   /* 10ms: angle loop */
+static const uint16_t kSpeedDivider = 50U;     /* 50ms: speed loop */
 }
 
 /* Set deterministic startup values for runtime state and PID parameters. */
 BalanceCarApp::BalanceCarApp()
-    : imu_(), oled_(), angle_pid_(kAngleKpDefault, kAngleKiDefault, kAngleKdDefault, kPidOutMin, kPidOutMax),
-      ax_(0), ay_(0), az_(0), gx_(0), gy_(0), gz_(0), timer_error_(0), timer_count_(0), timer_count_max_(0),
+    : imu_(), oled_(),
+      angle_pid_(kAngleKpDefault, kAngleKiDefault, kAngleKdDefault, kAnglePidOutMin, kAnglePidOutMax),
+      speed_pid_(kSpeedKpDefault, kSpeedKiDefault, kSpeedKdDefault, kSpeedPidOutMin, kSpeedPidOutMax),
+      turn_pid_(kTurnKpDefault, kTurnKiDefault, kTurnKdDefault, kTurnPidOutMin, kTurnPidOutMax),
+      ax_(0), ay_(0), az_(0), gx_(0), gy_(0), gz_(0),
+      timer_error_(0), timer_count_(0), timer_count_max_(0),
       angle_acc_(0.0f), angle_gyro_(0.0f), angle_(0.0f),
-      pid_out_(0.0f), run_flag_(0U),
+      left_speed_(0.0f), right_speed_(0.0f), ave_speed_(0.0f), dif_speed_(0.0f),
+      angle_pid_out_(0.0f), speed_pid_out_(0.0f), turn_pid_out_(0.0f), run_flag_(0U),
       dif_pwm_(0), left_pwm_(0), right_pwm_(0),
       imu_ready_(false),
-      angle_kp_(kAngleKpDefault), angle_ki_(kAngleKiDefault), angle_kd_(kAngleKdDefault)
+      angle_kp_(kAngleKpDefault), angle_ki_(kAngleKiDefault), angle_kd_(kAngleKdDefault),
+      speed_kp_(kSpeedKpDefault), speed_ki_(kSpeedKiDefault), speed_kd_(kSpeedKdDefault),
+      turn_kp_(kTurnKpDefault), turn_ki_(kTurnKiDefault), turn_kd_(kTurnKdDefault)
 {
 }
 
@@ -71,16 +93,21 @@ void BalanceCarApp::Init(void)
   imu_ready_ = imu_.Init();
 
   BoardBlueSerial().Init();
-  BoardBlueSerial().Printf("BT Ready\r\n");
-  BoardBlueSerial().Printf("Usage: [slider,1,3.00]\r\n");
-  BoardBlueSerial().Printf("Usage: [slider,2,0.10]\r\n");
-  BoardBlueSerial().Printf("Usage: [slider,3,3.00]\r\n");
-  BoardBlueSerial().Printf("Usage: [joystick,0,0,0,0]\r\n");
 
   angle_pid_.Init();
   angle_pid_.Configure(angle_kp_, angle_ki_, angle_kd_);
-  angle_pid_.SetOutputLimits(kPidOutMin, kPidOutMax);
+  angle_pid_.SetOutputLimits(kAnglePidOutMin, kAnglePidOutMax);
   angle_pid_.SetTarget(0.0f);
+
+  speed_pid_.Init();
+  speed_pid_.Configure(speed_kp_, speed_ki_, speed_kd_);
+  speed_pid_.SetOutputLimits(kSpeedPidOutMin, kSpeedPidOutMax);
+  speed_pid_.SetTarget(0.0f);
+
+  turn_pid_.Init();
+  turn_pid_.Configure(turn_kp_, turn_ki_, turn_kd_);
+  turn_pid_.SetOutputLimits(kTurnPidOutMin, kTurnPidOutMax);
+  turn_pid_.SetTarget(0.0f);
 
   if (!imu_ready_)
   {
@@ -108,34 +135,71 @@ void BalanceCarApp::HandleBluePacket(char *packet)
 
     const float parsed = (float)atof(value);
     const int32_t channel_id = (int32_t)atoi(channel);
-    bool gains_changed = false;
-    float kp = angle_kp_;
-    float ki = angle_ki_;
-    float kd = angle_kd_;
+    bool angle_changed = false;
+    bool speed_changed = false;
+    bool turn_changed = false;
 
     if ((channel_id == 1) || (strcmp(channel, "AngleKp") == 0))
     {
-      kp = parsed;
-      gains_changed = true;
+      angle_kp_ = parsed;
+      angle_changed = true;
     }
     else if ((channel_id == 2) || (strcmp(channel, "AngleKi") == 0))
     {
-      ki = parsed;
-      gains_changed = true;
+      angle_ki_ = parsed;
+      angle_changed = true;
     }
     else if ((channel_id == 3) || (strcmp(channel, "AngleKd") == 0))
     {
-      kd = parsed;
-      gains_changed = true;
+      angle_kd_ = parsed;
+      angle_changed = true;
+    }
+    else if ((channel_id == 4) || (strcmp(channel, "SpeedKp") == 0))
+    {
+      speed_kp_ = parsed;
+      speed_changed = true;
+    }
+    else if ((channel_id == 5) || (strcmp(channel, "SpeedKi") == 0))
+    {
+      speed_ki_ = parsed;
+      speed_changed = true;
+    }
+    else if ((channel_id == 6) || (strcmp(channel, "SpeedKd") == 0))
+    {
+      speed_kd_ = parsed;
+      speed_changed = true;
+    }
+    else if (strcmp(channel, "TurnKp") == 0)
+    {
+      turn_kp_ = parsed;
+      turn_changed = true;
+    }
+    else if (strcmp(channel, "TurnKi") == 0)
+    {
+      turn_ki_ = parsed;
+      turn_changed = true;
+    }
+    else if (strcmp(channel, "TurnKd") == 0)
+    {
+      turn_kd_ = parsed;
+      turn_changed = true;
     }
 
-    if (gains_changed)
+    if (angle_changed || speed_changed || turn_changed)
     {
       IrqLock lock;
-      angle_kp_ = kp;
-      angle_ki_ = ki;
-      angle_kd_ = kd;
-      angle_pid_.Configure(angle_kp_, angle_ki_, angle_kd_);
+      if (angle_changed)
+      {
+        angle_pid_.Configure(angle_kp_, angle_ki_, angle_kd_);
+      }
+      if (speed_changed)
+      {
+        speed_pid_.Configure(speed_kp_, speed_ki_, speed_kd_);
+      }
+      if (turn_changed)
+      {
+        turn_pid_.Configure(turn_kp_, turn_ki_, turn_kd_);
+      }
     }
   }
   else if (strcmp(tag, "joystick") == 0)
@@ -153,12 +217,12 @@ void BalanceCarApp::HandleBluePacket(char *packet)
 
     const int16_t lv = (int16_t)atoi(lv_s);
     const int16_t rh = (int16_t)atoi(rh_s);
-    const float target = (float)lv / 10.0f;
-    const int16_t dif = (int16_t)(rh / 2);
+    const float speed_target = (float)lv / 25.0f;
+    const float turn_target = (float)rh / 25.0f;
 
     IrqLock lock;
-    angle_pid_.SetTarget(target);
-    dif_pwm_ = dif;
+    speed_pid_.SetTarget(speed_target);
+    turn_pid_.SetTarget(turn_target);
   }
 }
 
@@ -176,14 +240,22 @@ void BalanceCarApp::Loop(void)
       if (run_flag_ == 0U)
       {
         angle_pid_.Init();
+        speed_pid_.Init();
+        turn_pid_.Init();
         angle_pid_.Configure(angle_kp_, angle_ki_, angle_kd_);
-        angle_pid_.SetOutputLimits(kPidOutMin, kPidOutMax);
+        speed_pid_.Configure(speed_kp_, speed_ki_, speed_kd_);
+        turn_pid_.Configure(turn_kp_, turn_ki_, turn_kd_);
+        angle_pid_.SetOutputLimits(kAnglePidOutMin, kAnglePidOutMax);
+        speed_pid_.SetOutputLimits(kSpeedPidOutMin, kSpeedPidOutMax);
+        turn_pid_.SetOutputLimits(kTurnPidOutMin, kTurnPidOutMax);
         run_flag_ = 1U;
       }
       else
       {
         run_flag_ = 0U;
-        pid_out_ = 0.0f;
+        angle_pid_out_ = 0.0f;
+        speed_pid_out_ = 0.0f;
+        turn_pid_out_ = 0.0f;
         left_pwm_ = 0;
         right_pwm_ = 0;
         stop_motors = true;
@@ -210,14 +282,27 @@ void BalanceCarApp::Loop(void)
 
   BoardOled().Clear();
   BoardOled().Printf(0, 0, OLED_6X8, "  Angle");
-  BoardOled().Printf(0, 8, OLED_6X8, "P:%05.2f", data.pid_kp);
-  BoardOled().Printf(0, 16, OLED_6X8, "I:%05.2f", data.pid_ki);
-  BoardOled().Printf(0, 24, OLED_6X8, "D:%05.2f", data.pid_kd);
-  BoardOled().Printf(0, 32, OLED_6X8, "T:%+05.1f", data.pid_target);
-  BoardOled().Printf(0, 40, OLED_6X8, "A:%+05.1f", data.angle+3);//
-  BoardOled().Printf(0, 48, OLED_6X8, "O:%+05.0f", data.pid_out);
-  BoardOled().Printf(0, 56, OLED_6X8, "R:%1u C:%2u/%2u E:%1u",
-                     data.run_flag, data.timer_count, data.timer_count_max, data.timer_error);
+  BoardOled().Printf(0, 8, OLED_6X8, "P:%05.2f", data.angle_pid_kp);
+  BoardOled().Printf(0, 16, OLED_6X8, "I:%05.2f", data.angle_pid_ki);
+  BoardOled().Printf(0, 24, OLED_6X8, "D:%05.2f", data.angle_pid_kd);
+  BoardOled().Printf(0, 32, OLED_6X8, "T:%+05.1f", data.angle_pid_target);
+  BoardOled().Printf(0, 40, OLED_6X8, "A:%+05.1f", data.angle+5);
+  BoardOled().Printf(0, 48, OLED_6X8, "O:%+05.0f", data.angle_pid_out);
+  BoardOled().Printf(0, 56, OLED_6X8, "GY:%+05d", data.gy);
+  BoardOled().Printf(50, 0, OLED_6X8, "Speed");
+  BoardOled().Printf(50, 8, OLED_6X8, "%05.2f", data.speed_pid_kp);
+  BoardOled().Printf(50, 16, OLED_6X8, "%05.2f", data.speed_pid_ki);
+  BoardOled().Printf(50, 24, OLED_6X8, "%05.2f", data.speed_pid_kd);
+  BoardOled().Printf(50, 32, OLED_6X8, "%+05.1f", data.speed_pid_target);
+  BoardOled().Printf(50, 40, OLED_6X8, "%+05.1f", data.ave_speed);
+  BoardOled().Printf(50, 48, OLED_6X8, "%+05.0f", data.speed_pid_out);
+  BoardOled().Printf(88, 0, OLED_6X8, "Turn");
+  BoardOled().Printf(88, 8, OLED_6X8, "%05.2f", data.turn_pid_kp);
+  BoardOled().Printf(88, 16, OLED_6X8, "%05.2f", data.turn_pid_ki);
+  BoardOled().Printf(88, 24, OLED_6X8, "%05.2f", data.turn_pid_kd);
+  BoardOled().Printf(88, 32, OLED_6X8, "%+05.1f", data.turn_pid_target);
+  BoardOled().Printf(88, 40, OLED_6X8, "%+05.1f", data.dif_speed);
+  BoardOled().Printf(88, 48, OLED_6X8, "%+05.0f", data.turn_pid_out);
   BoardOled().Update();
 
   {
@@ -234,17 +319,16 @@ void BalanceCarApp::Loop(void)
     if ((uint32_t)(now_ms - last_plot_ms) >= 50U)
     {
       last_plot_ms = now_ms;
-      const int16_t target_x10 = (int16_t)(data.pid_target * 10.0f);
-      const int16_t angle_x10 = (int16_t)((data.angle ) * 10.0f);
-      BoardBlueSerial().Printf("[plot,%d,%d]", (int)target_x10, (int)angle_x10+3);
+      BoardBlueSerial().Printf("[plot,%f,%f]", data.turn_pid_target, data.dif_speed);
     }
   }
 }
 
-/* TIM1 periodic callback: key scan and 10-step control task scheduler. */
+/* TIM1 periodic callback: key scan, angle loop (10ms), speed loop (50ms). */
 void BalanceCarApp::OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
 {
   static uint16_t count0 = 0U;
+  static uint16_t count1 = 0U;
 
   if (htim->Instance != TIM1)
   {
@@ -288,8 +372,8 @@ void BalanceCarApp::OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
 
       if (run_flag_ != 0U)
       {
-        pid_out_ = angle_pid_.Update(angle_+3);//新变化
-        const int16_t ave_pwm = (int16_t)(-pid_out_);
+        angle_pid_out_ = angle_pid_.Update(angle_+5);
+        const int16_t ave_pwm = (int16_t)(-angle_pid_out_);
         left_pwm_ = ClampPwm((int16_t)(ave_pwm + dif_pwm_ / 2));
         right_pwm_ = ClampPwm((int16_t)(ave_pwm - dif_pwm_ / 2));
         BoardMotor().SetPWM(1U, left_pwm_);
@@ -297,12 +381,35 @@ void BalanceCarApp::OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
       }
       else
       {
-        pid_out_ = 0.0f;
+        angle_pid_out_ = 0.0f;
+        speed_pid_out_ = 0.0f;
+        turn_pid_out_ = 0.0f;
         left_pwm_ = 0;
         right_pwm_ = 0;
         BoardMotor().SetPWM(1U, 0);
         BoardMotor().SetPWM(2U, 0);
       }
+    }
+  }
+
+  count1++;
+  if (count1 >= kSpeedDivider)
+  {
+    count1 = 0U;
+
+    left_speed_ = (float)BoardEncoder().Get(1) / 44.0f / kSpeedStepSec / 9.27666f;
+    right_speed_ = (float)BoardEncoder().Get(2) / 44.0f / kSpeedStepSec / 9.27666f;
+
+    ave_speed_ = (left_speed_ + right_speed_) / 2.0f;
+    dif_speed_ = left_speed_ - right_speed_;
+
+    if (run_flag_ != 0U)
+    {
+      speed_pid_out_ = speed_pid_.Update(ave_speed_);
+      angle_pid_.SetTarget(speed_pid_out_);
+
+      turn_pid_out_ = turn_pid_.Update(dif_speed_);
+      dif_pwm_ = (int16_t)turn_pid_out_;
     }
   }
 
@@ -330,14 +437,26 @@ void BalanceCarApp::CopyRuntimeData(RuntimeData *out) const
   out->timer_error = timer_error_;
   out->timer_count = timer_count_;
   out->timer_count_max = timer_count_max_;
-  out->pid_kp = angle_kp_;
-  out->pid_ki = angle_ki_;
-  out->pid_kd = angle_kd_;
-  out->pid_target = angle_pid_.Target();
-  out->pid_out = pid_out_;
+  out->angle_pid_kp = angle_kp_;
+  out->angle_pid_ki = angle_ki_;
+  out->angle_pid_kd = angle_kd_;
+  out->speed_pid_kp = speed_kp_;
+  out->speed_pid_ki = speed_ki_;
+  out->speed_pid_kd = speed_kd_;
+  out->turn_pid_kp = turn_kp_;
+  out->turn_pid_ki = turn_ki_;
+  out->turn_pid_kd = turn_kd_;
+  out->angle_pid_target = angle_pid_.Target();
+  out->speed_pid_target = speed_pid_.Target();
+  out->turn_pid_target = turn_pid_.Target();
+  out->angle_pid_out = angle_pid_out_;
+  out->speed_pid_out = speed_pid_out_;
+  out->turn_pid_out = turn_pid_out_;
   out->angle_acc = angle_acc_;
   out->angle_gyro = angle_gyro_;
   out->angle = angle_;
+  out->ave_speed = ave_speed_;
+  out->dif_speed = dif_speed_;
 }
 
 }  // namespace app
