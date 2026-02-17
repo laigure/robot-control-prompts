@@ -93,6 +93,10 @@ private:
   volatile int16_t dif_pwm_;
   volatile int16_t left_pwm_;
   volatile int16_t right_pwm_;
+  volatile float desired_speed_target_;
+  volatile float desired_turn_target_;
+  volatile int16_t gy_offset_;
+  volatile float angle_offset_;
   bool imu_ready_;
 };
 

@@ -11,20 +11,37 @@
 #include "led.h"
 #include "motor.h"
 #include "serial.h"
+#include "tunewizard_bridge.h"
+
+/* TuneWizard hot-updatable PID globals (written from UART ISR). */
+volatile float g_tw_kp = 0.0f;
+volatile float g_tw_ki = 0.0f;
+volatile float g_tw_kd = 0.0f;
+volatile uint8_t g_tw_params_updated = 0U;
+
+volatile float g_tw_skp = 0.0f;
+volatile float g_tw_ski = 0.0f;
+volatile float g_tw_skd = 0.0f;
+volatile uint8_t g_tw_speed_updated = 0U;
+
+volatile float g_tw_tkp = 0.0f;
+volatile float g_tw_tki = 0.0f;
+volatile float g_tw_tkd = 0.0f;
+volatile uint8_t g_tw_turn_updated = 0U;
 
 namespace app {
 namespace {
-static const float kAngleKpDefault = 3.0f;
+static const float kAngleKpDefault = 2.7f;
 static const float kAngleKiDefault = 0.1f;
-static const float kAngleKdDefault = 3.0f;
+static const float kAngleKdDefault = 2.5f;
 static const float kAnglePidOutMax = 100.0f;
 static const float kAnglePidOutMin = -100.0f;
 
-static const float kSpeedKpDefault = 2.0f;
-static const float kSpeedKiDefault = 0.05f;
+static const float kSpeedKpDefault = 1.5f;
+static const float kSpeedKiDefault = 0.03f;
 static const float kSpeedKdDefault = 0.0f;
-static const float kSpeedPidOutMax = 20.0f;
-static const float kSpeedPidOutMin = -20.0f;
+static const float kSpeedPidOutMax = 12.0f;
+static const float kSpeedPidOutMin = -12.0f;
 
 static const float kTurnKpDefault = 4.0f;
 static const float kTurnKiDefault = 3.0f;
@@ -33,12 +50,12 @@ static const float kTurnPidOutMax = 50.0f;
 static const float kTurnPidOutMin = -50.0f;
 
 static const int16_t kGyroBiasLsb = 16;
-static const float kAngleAccOffsetDeg = 0.5f;
+static const float kAngleAccOffsetDeg = 0.5f;   /* fallback if auto-cal fails */
 static const float kComplementaryAlpha = 0.01f;
 static const float kGyroScaleDps = 2000.0f / 32768.0f;
 static const float kControlStepSec = 0.01f;
 static const float kSpeedStepSec = 0.05f;
-static const float kStopAngleDeg = 50.0f;
+static const float kStopAngleDeg = 35.0f;   /* was 50, catch tilt earlier */
 static const uint16_t kControlDivider = 10U;   /* 10ms: angle loop */
 static const uint16_t kSpeedDivider = 50U;     /* 50ms: speed loop */
 }
@@ -54,6 +71,8 @@ BalanceCarApp::BalanceCarApp()
       angle_acc_(0.0f), angle_gyro_(0.0f), angle_(0.0f),
       left_speed_(0.0f), right_speed_(0.0f), ave_speed_(0.0f), dif_speed_(0.0f),
       run_flag_(0U), dif_pwm_(0), left_pwm_(0), right_pwm_(0),
+      desired_speed_target_(0.0f), desired_turn_target_(0.0f),
+      gy_offset_(kGyroBiasLsb), angle_offset_(kAngleAccOffsetDeg),
       imu_ready_(false)
 {
 }
@@ -89,6 +108,35 @@ void BalanceCarApp::Init(void)
   imu_ready_ = imu_.Init();
 
   BoardBlueSerial().Init();
+
+  /* Auto-calibrate gyro and accelerometer zero offset at startup.
+   * Car must be stationary and upright during this process.
+   * Samples 200 readings (~200ms) and averages them. */
+  if (imu_ready_)
+  {
+    BoardOled().Clear();
+    BoardOled().Printf(0, 0, OLED_6X8, "Calibrating...");
+    BoardOled().Printf(0, 8, OLED_6X8, "Keep still!");
+
+    int32_t gy_sum = 0;
+    float angle_acc_sum = 0.0f;
+    const int kCalSamples = 200;
+    for (int i = 0; i < kCalSamples; i++)
+    {
+      tasks::ImuSample s;
+      imu_.Read(&s);
+      gy_sum += s.gy;
+      angle_acc_sum += (-atan2f((float)s.ax, (float)s.az) * 57.2957795f);
+      HAL_Delay(1);
+    }
+    gy_offset_ = (int16_t)(gy_sum / kCalSamples);
+    angle_offset_ = -(angle_acc_sum / (float)kCalSamples);  /* negate: so angle=0 when upright */
+
+    BoardOled().Clear();
+    BoardOled().Printf(0, 0, OLED_6X8, "Gy off: %d", gy_offset_);
+    BoardOled().Printf(0, 8, OLED_6X8, "A  off: %.1f", angle_offset_);
+    HAL_Delay(500);
+  }
 
   /* Constructor already configured gains and output limits;
    * Init() only resets runtime state (target/error/integral/output). */
@@ -159,12 +207,8 @@ void BalanceCarApp::HandleBluePacket(char *packet)
 
     const int16_t lv = (int16_t)atoi(lv_s);
     const int16_t rh = (int16_t)atoi(rh_s);
-    const float speed_target = (float)lv / 25.0f;
-    const float turn_target = (float)rh / 25.0f;
-
-    IrqLock lock;
-    speed_pid_.SetTarget(speed_target);
-    turn_pid_.SetTarget(turn_target);
+    desired_speed_target_ = (float)lv / 25.0f;
+    desired_turn_target_ = (float)rh / 25.0f;
   }
 }
 
@@ -218,29 +262,20 @@ void BalanceCarApp::Loop(void)
   }
 
   BoardOled().Clear();
-  BoardOled().Printf(0, 0, OLED_6X8, "  Angle");
-  BoardOled().Printf(0, 8, OLED_6X8, "P:%05.2f", data.angle_pid_kp);
-  BoardOled().Printf(0, 16, OLED_6X8, "I:%05.2f", data.angle_pid_ki);
-  BoardOled().Printf(0, 24, OLED_6X8, "D:%05.2f", data.angle_pid_kd);
-  BoardOled().Printf(0, 32, OLED_6X8, "T:%+05.1f", data.angle_pid_target);
-  BoardOled().Printf(0, 40, OLED_6X8, "A:%+05.1f", data.angle);
-  BoardOled().Printf(0, 48, OLED_6X8, "O:%+05.0f", data.angle_pid_out);
-  BoardOled().Printf(0, 56, OLED_6X8, "GY:%+05d", data.gy);
-  BoardOled().Printf(56, 56, OLED_6X8, "Offset:%+05.1f", angle_pid_.Offset());
-  BoardOled().Printf(50, 0, OLED_6X8, "Speed");
-  BoardOled().Printf(50, 8, OLED_6X8, "%05.2f", data.speed_pid_kp);
-  BoardOled().Printf(50, 16, OLED_6X8, "%05.2f", data.speed_pid_ki);
-  BoardOled().Printf(50, 24, OLED_6X8, "%05.2f", data.speed_pid_kd);
-  BoardOled().Printf(50, 32, OLED_6X8, "%+05.1f", data.speed_pid_target);
-  BoardOled().Printf(50, 40, OLED_6X8, "%+05.1f", data.ave_speed);
-  BoardOled().Printf(50, 48, OLED_6X8, "%+05.0f", data.speed_pid_out);
-  BoardOled().Printf(88, 0, OLED_6X8, "Turn");
-  BoardOled().Printf(88, 8, OLED_6X8, "%05.2f", data.turn_pid_kp);
-  BoardOled().Printf(88, 16, OLED_6X8, "%05.2f", data.turn_pid_ki);
-  BoardOled().Printf(88, 24, OLED_6X8, "%05.2f", data.turn_pid_kd);
-  BoardOled().Printf(88, 32, OLED_6X8, "%+05.1f", data.turn_pid_target);
-  BoardOled().Printf(88, 40, OLED_6X8, "%+05.1f", data.dif_speed);
-  BoardOled().Printf(88, 48, OLED_6X8, "%+05.0f", data.turn_pid_out);
+  /* Row 0-24: PID params (compact) */
+  BoardOled().Printf(0,  0, OLED_6X8, "A P%.1f I%.2f D%.1f", data.angle_pid_kp, data.angle_pid_ki, data.angle_pid_kd);
+  BoardOled().Printf(0,  8, OLED_6X8, "S P%.1f I%.2f D%.1f", data.speed_pid_kp, data.speed_pid_ki, data.speed_pid_kd);
+  BoardOled().Printf(0, 16, OLED_6X8, "T P%.1f I%.1f D%.1f", data.turn_pid_kp, data.turn_pid_ki, data.turn_pid_kd);
+  /* Row 24-32: targets and actuals */
+  BoardOled().Printf(0, 24, OLED_6X8, "AT%+05.1f A%+05.1f", data.angle_pid_target, data.angle);
+  BoardOled().Printf(0, 32, OLED_6X8, "ST%+05.1f V%+05.1f", data.speed_pid_target, data.ave_speed);
+  /* Row 40: PID outputs */
+  BoardOled().Printf(0, 40, OLED_6X8, "uA%+04.0f uS%+04.0f uT%+04.0f", data.angle_pid_out, data.speed_pid_out, data.turn_pid_out);
+  /* Row 48: live sensor (Gy raw, angle) */
+  BoardOled().Printf(0, 48, OLED_6X8, "Gy%+05d Ang%+05.1f", data.gy, data.angle);
+  /* Row 56 (bottom): calibration offsets — always visible */
+  BoardOled().Printf(0, 56, OLED_6X8, "GO%+04d AO%+05.1f %s",
+      gy_offset_, angle_offset_, data.run_flag ? "RUN" : "STP");
   BoardOled().Update();
 
   {
@@ -258,7 +293,31 @@ void BalanceCarApp::Loop(void)
     {
       last_plot_ms = now_ms;
       BoardBlueSerial().Printf("[plot,%f,%f]", data.turn_pid_target, data.dif_speed);
+      /* TuneWizard telemetry: report all three loops */
+      TW_SendData3(data.angle_pid_target, data.angle, data.angle_pid_out,
+                   data.ave_speed, data.speed_pid_out,
+                   data.dif_speed, data.turn_pid_out);
     }
+  }
+
+  /* Apply TuneWizard PID params if received from PC. */
+  if (g_tw_params_updated != 0U)
+  {
+    IrqLock lock;
+    angle_pid_.Configure(g_tw_kp, g_tw_ki, g_tw_kd);
+    g_tw_params_updated = 0U;
+  }
+  if (g_tw_speed_updated != 0U)
+  {
+    IrqLock lock;
+    speed_pid_.Configure(g_tw_skp, g_tw_ski, g_tw_skd);
+    g_tw_speed_updated = 0U;
+  }
+  if (g_tw_turn_updated != 0U)
+  {
+    IrqLock lock;
+    turn_pid_.Configure(g_tw_tkp, g_tw_tki, g_tw_tkd);
+    g_tw_turn_updated = 0U;
   }
 }
 
@@ -287,9 +346,9 @@ void BalanceCarApp::OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
       tasks::ImuSample sample;
       imu_.Read(&sample);
 
-      const int16_t gy_corr = (int16_t)(sample.gy - kGyroBiasLsb);
+      const int16_t gy_corr = (int16_t)(sample.gy - gy_offset_);
       const float angle_acc =
-          (-atan2f((float)sample.ax, (float)sample.az) * 57.2957795f) + kAngleAccOffsetDeg;
+          (-atan2f((float)sample.ax, (float)sample.az) * 57.2957795f) + angle_offset_;
       const float angle_gyro = angle_ + ((float)gy_corr * kGyroScaleDps * kControlStepSec);
       const float angle = kComplementaryAlpha * angle_acc + (1.0f - kComplementaryAlpha) * angle_gyro;
 
@@ -311,8 +370,40 @@ void BalanceCarApp::OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
       if (run_flag_ != 0U)
       {
         const int16_t ave_pwm = (int16_t)(-angle_pid_.Update(angle_ ));
-        left_pwm_ = ClampPwm((int16_t)(ave_pwm + dif_pwm_ / 2));
-        right_pwm_ = ClampPwm((int16_t)(ave_pwm - dif_pwm_ / 2));
+        int16_t new_left  = ClampPwm((int16_t)(ave_pwm + dif_pwm_ / 2));
+        int16_t new_right = ClampPwm((int16_t)(ave_pwm - dif_pwm_ / 2));
+
+        /* Adaptive PWM slew-rate limiter.
+         * When gyro detects fast rotation (large |gy|), the D-term
+         * produces large spikes. Limit how fast PWM can change per
+         * cycle to prevent violent motor jerks, especially on
+         * joystick reversal. During calm balancing, allow full speed.
+         *
+         * |gy| < 100 dps  => max_step = 30 (fast response)
+         * |gy| > 300 dps  => max_step = 8  (tight limit)
+         * in between      => linear interpolation
+         */
+        const float abs_gy = (gy_ > 0) ? (float)gy_ : (float)(-gy_);
+        const float gy_dps = abs_gy * 0.0610352f;  /* gy/16.4 for ±2000dps */
+        int16_t max_step;
+        if (gy_dps < 100.0f) {
+          max_step = 30;
+        } else if (gy_dps > 300.0f) {
+          max_step = 8;
+        } else {
+          /* Linear from 30 down to 8 over 100..300 dps range */
+          max_step = (int16_t)(30.0f - (gy_dps - 100.0f) * 22.0f / 200.0f);
+        }
+
+        int16_t dl = new_left - left_pwm_;
+        int16_t dr = new_right - right_pwm_;
+        if (dl >  max_step) dl =  max_step;
+        if (dl < -max_step) dl = -max_step;
+        if (dr >  max_step) dr =  max_step;
+        if (dr < -max_step) dr = -max_step;
+
+        left_pwm_  = ClampPwm(left_pwm_ + dl);
+        right_pwm_ = ClampPwm(right_pwm_ + dr);
         BoardMotor().SetPWM(1U, left_pwm_);
         BoardMotor().SetPWM(2U, right_pwm_);
       }
@@ -339,6 +430,22 @@ void BalanceCarApp::OnTimPeriodElapsed(TIM_HandleTypeDef *htim)
 
     if (run_flag_ != 0U)
     {
+      /* Ramp speed/turn targets toward desired values (smooth joystick). */
+      static const float kSpeedRamp = 0.2f;  /* max change per 50ms step */
+      static const float kTurnRamp  = 0.5f;
+
+      float cur_st = speed_pid_.Target();
+      float delta_s = desired_speed_target_ - cur_st;
+      if (delta_s > kSpeedRamp) delta_s = kSpeedRamp;
+      if (delta_s < -kSpeedRamp) delta_s = -kSpeedRamp;
+      speed_pid_.SetTarget(cur_st + delta_s);
+
+      float cur_tt = turn_pid_.Target();
+      float delta_t = desired_turn_target_ - cur_tt;
+      if (delta_t > kTurnRamp) delta_t = kTurnRamp;
+      if (delta_t < -kTurnRamp) delta_t = -kTurnRamp;
+      turn_pid_.SetTarget(cur_tt + delta_t);
+
       angle_pid_.SetTarget(speed_pid_.Update(ave_speed_));
       dif_pwm_ = (int16_t)turn_pid_.Update(dif_speed_);
     }

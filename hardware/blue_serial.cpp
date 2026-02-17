@@ -1,4 +1,5 @@
 #include "blue_serial.h"
+#include "tunewizard_bridge.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -164,6 +165,9 @@ void BlueSerialLink::OnRxComplete(UART_HandleTypeDef *huart)
   {
     return;
   }
+
+  /* Feed every byte to TuneWizard parser (PID commands use \n framing). */
+  TW_RxByte(rx_byte_);
 
   if (rx_state_ == 0U)
   {

@@ -109,10 +109,15 @@ float PidController::Offset(void) const
 void PidController::SetOffset(float offset){
   offset_=offset;
 }
-/* Run one update step:
+/* Run one update step with anti-windup:
  * e(k)=target-actual
  * u=Kp*e + Ki*sum(e) + Kd*(e-e_prev)
  * u is clamped to configured output limits.
+ *
+ * Anti-windup: the integral term stops accumulating when the output
+ * is already saturated in the same direction as the error. This
+ * prevents "integral windup" that causes large oscillations after
+ * fast movements (e.g. joystick release on a balance car).
  */
 float PidController::Update(float actual)
 {
@@ -122,7 +127,25 @@ float PidController::Update(float actual)
 
   if (ki_ != 0.0f)
   {
-    error_int_ += error0_;
+    /* Conditional integration: only accumulate if output is not
+     * saturated, or if the error would help reduce saturation. */
+    const float new_int = error_int_ + error0_;
+    const float unclamped_out = kp_ * error0_ + ki_ * new_int + kd_ * (error0_ - error1_);
+
+    /* Allow integration if:
+     * 1) output is within limits, OR
+     * 2) the new error pushes the integral toward zero (unwinding) */
+    if ((unclamped_out > out_min_ && unclamped_out < out_max_) ||
+        (error0_ * error_int_ < 0.0f))
+    {
+      error_int_ = new_int;
+    }
+
+    /* Hard clamp: integral can never exceed the output range / Ki.
+     * This bounds the maximum integral contribution. */
+    const float int_max = (out_max_ - out_min_) / ki_;
+    if (error_int_ > int_max)  error_int_ = int_max;
+    if (error_int_ < -int_max) error_int_ = -int_max;
   }
   else
   {
