@@ -10,11 +10,11 @@ PidController::PidController()
 }
 
 /* Build PID controller with provided gains and output limits. */
-PidController::PidController(float kp, float ki, float kd, float out_min, float out_max)
+PidController::PidController(float kp, float ki, float kd, float out_min, float out_max,float offset)
     : target_(0.0f), actual_(0.0f), out_(0.0f),
       kp_(kp), ki_(ki), kd_(kd),
       error0_(0.0f), error1_(0.0f), error_int_(0.0f),
-      out_max_(out_max), out_min_(out_min)
+      out_max_(out_max), out_min_(out_min),offset_(offset)
 {
   SetOutputLimits(out_min, out_max);
 }
@@ -84,18 +84,31 @@ float PidController::Output(void) const
   return out_;
 }
 
-/* Get current control error. */
-float PidController::Error(void) const
+/* Get proportional gain. */
+float PidController::Kp(void) const
 {
-  return error0_;
+  return kp_;
 }
 
-/* Get integral accumulator. */
-float PidController::Integral(void) const
+/* Get integral gain. */
+float PidController::Ki(void) const
 {
-  return error_int_;
+  return ki_;
 }
 
+/* Get derivative gain. */
+float PidController::Kd(void) const
+{
+  return kd_;
+}
+
+float PidController::Offset(void) const
+{
+  return offset_;
+}
+void PidController::SetOffset(float offset){
+  offset_=offset;
+}
 /* Run one update step:
  * e(k)=target-actual
  * u=Kp*e + Ki*sum(e) + Kd*(e-e_prev)
@@ -117,6 +130,10 @@ float PidController::Update(float actual)
   }
 
   out_ = kp_ * error0_ + ki_ * error_int_ + kd_ * (error0_ - error1_);
+  if(out_>0)
+	  out_+=offset_;
+  if(out_<0)
+	  out_-=offset_;
   out_ = Clamp(out_, out_min_, out_max_);
   return out_;
 }
@@ -161,7 +178,7 @@ void PID_Update(PID_t *p)
   p->Out = p->Kp * p->Error0
          + p->Ki * p->ErrorInt
          + p->Kd * (p->Error0 - p->Error1);
-
+  
   if (p->Out > p->OutMax)
   {
     p->Out = p->OutMax;

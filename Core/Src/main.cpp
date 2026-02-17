@@ -85,6 +85,7 @@ int main(void)
   while (1)
   {
     g_app.Loop();
+    
   }
 }
 

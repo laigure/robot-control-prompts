@@ -89,23 +89,11 @@ private:
   volatile float ave_speed_;
   volatile float dif_speed_;
 
-  volatile float angle_pid_out_;
-  volatile float speed_pid_out_;
-  volatile float turn_pid_out_;
   volatile uint8_t run_flag_;
   volatile int16_t dif_pwm_;
   volatile int16_t left_pwm_;
   volatile int16_t right_pwm_;
   bool imu_ready_;
-  float angle_kp_;
-  float angle_ki_;
-  float angle_kd_;
-  float speed_kp_;
-  float speed_ki_;
-  float speed_kd_;
-  float turn_kp_;
-  float turn_ki_;
-  float turn_kd_;
 };
 
 }  // namespace app

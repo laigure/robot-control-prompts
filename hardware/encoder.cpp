@@ -44,7 +44,7 @@ int16_t EncoderReader::Get(uint8_t n)
 
 namespace {
 /* Board default encoder reader on TIM3/TIM4. */
-EncoderReader g_encoder(&htim3, &htim4, true);
+EncoderReader g_encoder(&htim3, &htim4, false);
 }
 
 /* Accessor for board encoder singleton. */
